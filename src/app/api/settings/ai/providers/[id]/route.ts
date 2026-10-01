@@ -2,7 +2,10 @@ import { and, eq } from "drizzle-orm";
 import { NextResponse } from "next/server";
 import { db } from "@/db";
 import { apiCredentials, userSettings } from "@/db/schema";
-import { revokeChatGptCredential } from "@/lib/ai/chatgpt/connect";
+import {
+    forgetChatGptModels,
+    revokeChatGptCredential,
+} from "@/lib/ai/chatgpt/connect";
 import { CHATGPT_PROVIDER_NAME } from "@/lib/ai/chatgpt/shared";
 import {
     supportsEnhancement,
@@ -209,6 +212,7 @@ export const DELETE = apiHandler<IdContext>(async (request, context) => {
     const revoked = chatGptRow
         ? await revokeChatGptCredential(chatGptRow.apiKey)
         : true;
+    if (chatGptRow) forgetChatGptModels(id);
 
     // Verify ownership and delete
     await db

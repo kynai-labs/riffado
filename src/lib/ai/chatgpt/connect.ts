@@ -359,7 +359,7 @@ export async function completeChatGptSignIn(args: {
     const { id, defaultModel } = saved;
 
     if (models.length > 0) {
-        modelCache.set(id, { models, fetchedAt: Date.now() });
+        setCachedModels(id, models);
     }
     return { id, email: credential.email, defaultModel, models };
 }
@@ -373,7 +373,10 @@ export async function revokeChatGptCredential(
     encrypted: string,
 ): Promise<boolean> {
     const credential = tryParse(encrypted);
-    if (!credential?.refreshToken) return true;
+    // Unreadable: we can't confirm anything, so let the caller warn.
+    if (!credential) return false;
+    // Nothing long-lived to revoke.
+    if (!credential.refreshToken) return true;
     return revokeRefreshToken({
         clientId: credential.clientId,
         refreshToken: credential.refreshToken,
@@ -400,6 +403,21 @@ export function resetChatGptModelCache(): void {
     modelCache.clear();
 }
 
+function setCachedModels(credentialId: string, models: ChatGptModel[]): void {
+    // Sweep expired entries on write so deleted or abandoned credentials
+    // don't accumulate (one entry per ChatGPT connection, at most).
+    const now = Date.now();
+    for (const [key, entry] of modelCache) {
+        if (now - entry.fetchedAt >= MODEL_CACHE_TTL_MS) modelCache.delete(key);
+    }
+    modelCache.set(credentialId, { models, fetchedAt: now });
+}
+
+/** Drop cached models for a credential (called when it's deleted). */
+export function forgetChatGptModels(credentialId: string): void {
+    modelCache.delete(credentialId);
+}
+
 async function getPlanModels(
     credentialId: string,
     accessToken: string,
@@ -409,7 +427,7 @@ async function getPlanModels(
         return cached.models;
     }
     const models = await listChatGptModels(accessToken);
-    modelCache.set(credentialId, { models, fetchedAt: Date.now() });
+    setCachedModels(credentialId, models);
     return models;
 }
 
@@ -420,7 +438,7 @@ export async function listModelsForCredential(row: {
 }): Promise<ChatGptModel[]> {
     const accessToken = await getChatGptAccessToken(row);
     const models = await listChatGptModels(accessToken);
-    modelCache.set(row.id, { models, fetchedAt: Date.now() });
+    setCachedModels(row.id, models);
     return models;
 }
 

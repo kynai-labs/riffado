@@ -28,14 +28,19 @@ vi.mock("@/db", () => ({
 import { db } from "@/db";
 import {
     completeChatGptSignIn,
+    forgetChatGptModels,
     PENDING_SIGN_IN_TTL_MS,
     type PendingSignIn,
     resetChatGptModelCache,
     resolveChatGptModel,
+    revokeChatGptCredential,
     sealPendingSignIn,
     unsealPendingSignIn,
 } from "@/lib/ai/chatgpt/connect";
-import { parseCredential } from "@/lib/ai/chatgpt/credentials";
+import {
+    parseCredential,
+    serializeCredential,
+} from "@/lib/ai/chatgpt/credentials";
 import { resetJwksCache } from "@/lib/ai/chatgpt/oauth";
 import { ErrorCode } from "@/lib/errors";
 
@@ -429,5 +434,70 @@ describe("resolveChatGptModel", () => {
     it("falls back to the saved model if the list can't be loaded", async () => {
         fetchMock.mockRejectedValue(new TypeError("fetch failed"));
         await expect(resolveChatGptModel("c1", "at", "b")).resolves.toBe("b");
+    });
+});
+
+describe("revokeChatGptCredential", () => {
+    afterEach(() => {
+        vi.unstubAllGlobals();
+    });
+
+    it("reports an unreadable credential as not revoked", async () => {
+        await expect(revokeChatGptCredential("garbage")).resolves.toBe(false);
+    });
+
+    it("has nothing to revoke without a refresh token", async () => {
+        const sealed = serializeCredential({
+            v: 1,
+            clientId: "c",
+            hostId: "h",
+            subject: "s",
+            email: null,
+            idToken: null,
+            accessToken: "at",
+            refreshToken: null,
+            expiresAt: Date.now() + 60_000,
+            earliestRefreshAt: null,
+            scopes: [],
+        });
+        await expect(revokeChatGptCredential(sealed)).resolves.toBe(true);
+    });
+});
+
+describe("model cache eviction", () => {
+    const fetchMock = vi.fn();
+
+    beforeEach(() => {
+        resetChatGptModelCache();
+        fetchMock.mockReset();
+        fetchMock.mockImplementation(
+            async () =>
+                new Response(
+                    JSON.stringify({
+                        models: [{ slug: "a", visibility: "list" }],
+                    }),
+                ),
+        );
+        vi.stubGlobal("fetch", fetchMock);
+    });
+
+    afterEach(() => {
+        vi.unstubAllGlobals();
+        vi.useRealTimers();
+    });
+
+    it("refetches after a credential is forgotten", async () => {
+        await resolveChatGptModel("c1", "at", "a");
+        forgetChatGptModels("c1");
+        await resolveChatGptModel("c1", "at", "a");
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("refetches once the cached list expires", async () => {
+        vi.useFakeTimers();
+        await resolveChatGptModel("c1", "at", "a");
+        vi.advanceTimersByTime(11 * 60 * 1000);
+        await resolveChatGptModel("c1", "at", "a");
+        expect(fetchMock).toHaveBeenCalledTimes(2);
     });
 });
