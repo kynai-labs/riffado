@@ -23,6 +23,12 @@ vi.mock("@/lib/encryption/fields", () => ({
     decryptJsonField: vi.fn().mockReturnValue(null),
 }));
 
+// `@/lib/errors` reports 5xx to PostHog, which pulls in env validation.
+vi.mock("@/lib/posthog-server", () => ({
+    captureServerEvent: vi.fn().mockResolvedValue(undefined),
+    captureServerException: vi.fn(),
+}));
+
 const { chatCompletionsCreate } = vi.hoisted(() => ({
     chatCompletionsCreate: vi.fn(),
 }));
