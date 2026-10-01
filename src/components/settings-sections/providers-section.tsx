@@ -130,7 +130,14 @@ export function ProvidersSection({
                         };
                         throw new Error(error.error || "Failed to delete");
                     }
-                    toast.success("Provider deleted successfully");
+                    const data = (await response.json().catch(() => null)) as {
+                        warning?: string;
+                    } | null;
+                    if (data?.warning) {
+                        toast.warning(data.warning);
+                    } else {
+                        toast.success("Provider deleted successfully");
+                    }
                     await refreshProviders();
                 } finally {
                     setDeletingId(null);

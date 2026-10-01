@@ -154,6 +154,11 @@ export function AddProviderDialog({
                                 onSuccess();
                                 onOpenChange(false);
                                 setProvider("");
+                                setApiKey("");
+                                setBaseUrl("");
+                                setDefaultModel("");
+                                setIsDefaultTranscription(false);
+                                setIsDefaultEnhancement(false);
                             }}
                             onCancel={() => onOpenChange(false)}
                         />

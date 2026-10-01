@@ -22,6 +22,7 @@ import {
     parseCallbackUrl,
     refreshAccessToken,
     resetJwksCache,
+    revokeRefreshToken,
     verifyIdToken,
 } from "@/lib/ai/chatgpt/oauth";
 
@@ -209,6 +210,25 @@ describe("token endpoint", () => {
     });
 });
 
+describe("revokeRefreshToken", () => {
+    it("reports success only when OpenAI confirms", async () => {
+        fetchMock.mockResolvedValueOnce(new Response(null, { status: 200 }));
+        await expect(
+            revokeRefreshToken({ clientId: "c", refreshToken: "rt" }),
+        ).resolves.toBe(true);
+
+        fetchMock.mockResolvedValueOnce(new Response("{}", { status: 401 }));
+        await expect(
+            revokeRefreshToken({ clientId: "c", refreshToken: "rt" }),
+        ).resolves.toBe(false);
+
+        fetchMock.mockRejectedValueOnce(new TypeError("fetch failed"));
+        await expect(
+            revokeRefreshToken({ clientId: "c", refreshToken: "rt" }),
+        ).resolves.toBe(false);
+    });
+});
+
 describe("assertPlanUsageGranted", () => {
     it("passes when plan-usage scopes were granted", () => {
         expect(() =>
@@ -324,9 +344,16 @@ describe("verifyIdToken", () => {
     });
 
     it("refetches the JWKS once when the key id is unknown (rotation)", async () => {
+        // The cached keyset only has an older key under another kid, so
+        // kid matching must reject it and refetch.
+        const oldKey = generateKeyPairSync("rsa", { modulusLength: 2048 });
+        const oldJwk = {
+            ...oldKey.publicKey.export({ format: "jwk" }),
+            kid: "k0",
+        };
         fetchMock
-            .mockResolvedValueOnce(jsonResponse({ keys: [] }))
-            .mockResolvedValueOnce(jsonResponse({ keys: [jwk] }));
+            .mockResolvedValueOnce(jsonResponse({ keys: [oldJwk] }))
+            .mockResolvedValueOnce(jsonResponse({ keys: [oldJwk, jwk] }));
         await expect(
             verifyIdToken(makeToken(goodClaims()), {
                 clientId: "oaiapp_1",
@@ -334,5 +361,22 @@ describe("verifyIdToken", () => {
             }),
         ).resolves.toMatchObject({ sub: "user-sub" });
         expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("rejects a token whose kid matches no published key", async () => {
+        const oldKey = generateKeyPairSync("rsa", { modulusLength: 2048 });
+        const oldJwk = {
+            ...oldKey.publicKey.export({ format: "jwk" }),
+            kid: "k0",
+        };
+        fetchMock.mockImplementation(async () =>
+            jsonResponse({ keys: [oldJwk] }),
+        );
+        await expect(
+            verifyIdToken(makeToken(goodClaims()), {
+                clientId: "oaiapp_1",
+                nonce: "n1",
+            }),
+        ).rejects.toThrow("signing key not found");
     });
 });

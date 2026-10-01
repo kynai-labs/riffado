@@ -124,75 +124,72 @@ export function needsRefresh(
     return true;
 }
 
-async function persistCredential(
-    row: { id: string; userId: string },
-    credential: ChatGptCredential,
-): Promise<void> {
-    await db
-        .update(apiCredentials)
-        .set({ apiKey: serializeCredential(credential), updatedAt: new Date() })
-        .where(
-            and(
-                eq(apiCredentials.id, row.id),
-                eq(apiCredentials.userId, row.userId),
-            ),
-        );
-}
-
 /**
- * Refresh tokens rotate and OpenAI rejects a reused refresh token, so two
- * concurrent callers (auto-title and auto-summary right after a
- * transcription) must not both refresh. Serialize per credential row.
+ * Refresh tokens rotate and OpenAI rejects a reused refresh token
+ * (`refresh_token_reused`), so two callers must never refresh the same
+ * row at once. Within one process, concurrent callers (auto-title and
+ * auto-summary right after a transcription) share one in-flight refresh.
+ * Across processes, and against a reconnect landing mid-refresh, the
+ * read-refresh-write runs in a transaction holding a row lock
+ * (`SELECT ... FOR UPDATE`): a second refresher waits and then sees the
+ * already-rotated tokens, and a reconnect's write lands after ours
+ * instead of being overwritten by it.
  */
 const inflightRefresh = new Map<string, Promise<ChatGptCredential>>();
 
-async function loadStoredCredential(row: {
+async function refreshAndPersist(row: {
     id: string;
     userId: string;
-}): Promise<ChatGptCredential | null> {
-    const [stored] = await db
-        .select({ apiKey: apiCredentials.apiKey })
-        .from(apiCredentials)
-        .where(
-            and(
-                eq(apiCredentials.id, row.id),
-                eq(apiCredentials.userId, row.userId),
-            ),
-        )
-        .limit(1);
-    return stored ? parseCredential(stored.apiKey) : null;
-}
+}): Promise<ChatGptCredential> {
+    return db.transaction(async (tx) => {
+        const [stored] = await tx
+            .select({ apiKey: apiCredentials.apiKey })
+            .from(apiCredentials)
+            .where(
+                and(
+                    eq(apiCredentials.id, row.id),
+                    eq(apiCredentials.userId, row.userId),
+                ),
+            )
+            .limit(1)
+            .for("update");
+        if (!stored) throw reconnectError();
 
-async function refreshAndPersist(
-    row: { id: string; userId: string },
-    staleCredential: ChatGptCredential,
-): Promise<ChatGptCredential> {
-    // The caller's row may predate a refresh another request already
-    // persisted. Refreshing with that rotated-out token would trip
-    // `refresh_token_reused` and kill the session, so re-read first.
-    const credential = (await loadStoredCredential(row)) ?? staleCredential;
-    if (!needsRefresh(credential)) return credential;
-    if (!credential.refreshToken) throw reconnectError();
+        // Re-read under the lock: another request or replica may have
+        // refreshed (or the user reconnected) since the caller loaded
+        // its row.
+        const credential = parseCredential(stored.apiKey);
+        if (!needsRefresh(credential)) return credential;
+        if (!credential.refreshToken) throw reconnectError();
 
-    let tokens: TokenResponse;
-    try {
-        tokens = await refreshAccessToken({
-            clientId: credential.clientId,
-            refreshToken: credential.refreshToken,
-        });
-    } catch (error) {
-        if (isReauthRequiredError(error)) throw reconnectError();
-        throw new AppError(
-            ErrorCode.AI_PROVIDER_API_ERROR,
-            "Couldn't refresh the ChatGPT sign-in. Try again in a moment.",
-            502,
-            { provider: CHATGPT_PROVIDER_NAME },
-        );
-    }
+        let tokens: TokenResponse;
+        try {
+            tokens = await refreshAccessToken({
+                clientId: credential.clientId,
+                refreshToken: credential.refreshToken,
+            });
+        } catch (error) {
+            if (isReauthRequiredError(error)) throw reconnectError();
+            throw new AppError(
+                ErrorCode.AI_PROVIDER_API_ERROR,
+                "Couldn't refresh the ChatGPT sign-in. Try again in a moment.",
+                502,
+                { provider: CHATGPT_PROVIDER_NAME },
+            );
+        }
 
-    const next = applyTokenResponse(credential, tokens);
-    await persistCredential(row, next);
-    return next;
+        const next = applyTokenResponse(credential, tokens);
+        await tx
+            .update(apiCredentials)
+            .set({ apiKey: serializeCredential(next), updatedAt: new Date() })
+            .where(
+                and(
+                    eq(apiCredentials.id, row.id),
+                    eq(apiCredentials.userId, row.userId),
+                ),
+            );
+        return next;
+    });
 }
 
 /**
@@ -209,7 +206,7 @@ export async function getChatGptAccessToken(row: {
 
     let pending = inflightRefresh.get(row.id);
     if (!pending) {
-        pending = refreshAndPersist(row, credential).finally(() => {
+        pending = refreshAndPersist(row).finally(() => {
             inflightRefresh.delete(row.id);
         });
         inflightRefresh.set(row.id, pending);

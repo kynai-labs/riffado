@@ -25,6 +25,7 @@ vi.mock("@/db", () => ({
     db: {
         select: vi.fn(),
         update: vi.fn(),
+        transaction: vi.fn(),
     },
 }));
 
@@ -63,11 +64,18 @@ function credential(
 let stored: string;
 let updateSet: Mock;
 
+let lockStrength: Mock;
+
+/**
+ * The refresh runs in `db.transaction` and reads the row with
+ * `SELECT ... FOR UPDATE`; the tx mock reads/writes `stored`.
+ */
 function mockDb() {
-    (db.select as Mock).mockImplementation(() => ({
+    lockStrength = vi.fn(async () => [{ apiKey: stored }]);
+    const select = vi.fn(() => ({
         from: () => ({
             where: () => ({
-                limit: async () => [{ apiKey: stored }],
+                limit: () => ({ for: lockStrength }),
             }),
         }),
     }));
@@ -75,7 +83,10 @@ function mockDb() {
         stored = values.apiKey;
         return { where: async () => undefined };
     });
-    (db.update as Mock).mockImplementation(() => ({ set: updateSet }));
+    const update = vi.fn(() => ({ set: updateSet }));
+    (db.transaction as Mock).mockImplementation(
+        async (fn: (tx: unknown) => unknown) => fn({ select, update }),
+    );
 }
 
 beforeEach(() => {
@@ -211,6 +222,8 @@ describe("getChatGptAccessToken", () => {
         expect(body.get("refresh_token")).toBe("old-rt");
 
         expect(parseCredential(stored).refreshToken).toBe("new-rt");
+        // Read under a row lock so other replicas / a reconnect serialize.
+        expect(lockStrength).toHaveBeenCalledWith("update");
     });
 
     it("uses a token another request already refreshed instead of reusing the old refresh token", async () => {

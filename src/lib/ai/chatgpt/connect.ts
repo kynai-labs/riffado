@@ -3,7 +3,7 @@
  * the single entry point enhancement code calls to run a completion.
  */
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { apiCredentials } from "@/db/schema";
 import { decrypt, encrypt } from "@/lib/encryption";
@@ -30,6 +30,7 @@ import {
     parseCallbackUrl,
     randomToken,
     revokeRefreshToken,
+    type TokenResponse,
     verifyIdToken,
 } from "./oauth";
 import { CHATGPT_BASE_URL, CHATGPT_PROVIDER_NAME } from "./shared";
@@ -145,7 +146,9 @@ function toAppError(error: unknown): AppError {
             ErrorCode.INVALID_INPUT,
             error.code === "insufficient_scope"
                 ? error.message
-                : `ChatGPT sign-in failed: ${error.message}`,
+                : error.code === "invalid_grant"
+                  ? "That sign-in link was already used or has expired. Click “Sign in with ChatGPT” again."
+                  : `ChatGPT sign-in failed: ${error.message}`,
             400,
             { provider: CHATGPT_PROVIDER_NAME, upstreamCode: error.code },
         );
@@ -203,14 +206,30 @@ export async function completeChatGptSignIn(args: {
         );
     }
 
-    let credential: ChatGptCredential;
-    let models: ChatGptModel[];
+    let tokens: TokenResponse;
     try {
-        const tokens = await exchangeAuthorizationCode({
+        tokens = await exchangeAuthorizationCode({
             clientId,
             code: parsed.code,
             codeVerifier: pending.codeVerifier,
         });
+    } catch (error) {
+        throw toAppError(error);
+    }
+
+    // From here on OpenAI has issued a refresh token. Any failure before
+    // it's stored must revoke it, or it stays live with no copy left in
+    // Riffado to revoke later.
+    const revokeIssued = () =>
+        tokens.refresh_token
+            ? revokeRefreshToken({
+                  clientId,
+                  refreshToken: tokens.refresh_token,
+              })
+            : Promise.resolve(false);
+
+    let credential: ChatGptCredential;
+    try {
         assertPlanUsageGranted(tokens.scope);
         if (!tokens.id_token) {
             throw new ChatGptOAuthError(
@@ -234,78 +253,128 @@ export async function completeChatGptSignIn(args: {
             },
             tokens,
         );
-        models = await listChatGptModels(credential.accessToken);
     } catch (error) {
+        await revokeIssued();
         throw toAppError(error);
     }
 
-    const existing = await findChatGptRow(userId);
-    const keepModel =
-        existing?.defaultModel &&
-        models.some((m) => m.slug === existing.defaultModel)
-            ? existing.defaultModel
-            : null;
-    const defaultModel = keepModel ?? models[0]?.slug ?? null;
+    // The model list is a convenience, not a requirement: a temporary
+    // models outage must not throw away a valid, already-spent sign-in.
+    let models: ChatGptModel[] = [];
+    try {
+        models = await listChatGptModels(credential.accessToken);
+    } catch (error) {
+        console.warn(
+            "[chatgpt] listing plan models after sign-in failed",
+            error,
+        );
+    }
+
     const sealed = serializeCredential(credential);
 
-    const id = await db.transaction(async (tx) => {
-        if (existing) {
-            await tx
-                .update(apiCredentials)
-                .set({
-                    apiKey: sealed,
-                    baseUrl: CHATGPT_BASE_URL,
-                    defaultModel,
-                    isDefaultTranscription: false,
-                    updatedAt: new Date(),
+    let saved: { id: string; defaultModel: string | null };
+    try {
+        saved = await db.transaction(async (tx) => {
+            // Serialize connects per user so two sign-ins finishing at once
+            // (double click, two tabs) can't each insert a ChatGPT row.
+            await tx.execute(
+                sql`select pg_advisory_xact_lock(hashtextextended(${`chatgpt-connect:${userId}`}, 0))`,
+            );
+
+            const [existing] = await tx
+                .select({
+                    id: apiCredentials.id,
+                    defaultModel: apiCredentials.defaultModel,
                 })
+                .from(apiCredentials)
                 .where(
                     and(
-                        eq(apiCredentials.id, existing.id),
                         eq(apiCredentials.userId, userId),
+                        eq(apiCredentials.provider, CHATGPT_PROVIDER_NAME),
                     ),
-                );
-            return existing.id;
-        }
+                )
+                .limit(1)
+                .for("update");
 
-        // First connection: become the enhancement default unless the
-        // user already picked one.
-        const [currentDefault] = await tx
-            .select({ id: apiCredentials.id })
-            .from(apiCredentials)
-            .where(
-                and(
-                    eq(apiCredentials.userId, userId),
-                    eq(apiCredentials.isDefaultEnhancement, true),
-                ),
-            )
-            .limit(1);
+            // Keep the user's model on reconnect if the plan still offers it
+            // (or if the list couldn't be loaded; it's re-checked per request).
+            const keepExisting =
+                existing?.defaultModel &&
+                (models.length === 0 ||
+                    models.some((m) => m.slug === existing.defaultModel));
+            const model = keepExisting
+                ? existing.defaultModel
+                : (models[0]?.slug ?? null);
 
-        const [inserted] = await tx
-            .insert(apiCredentials)
-            .values({
-                userId,
-                provider: CHATGPT_PROVIDER_NAME,
-                apiKey: sealed,
-                baseUrl: CHATGPT_BASE_URL,
-                defaultModel,
-                isDefaultTranscription: false,
-                isDefaultEnhancement: !currentDefault,
-            })
-            .returning({ id: apiCredentials.id });
-        return inserted.id;
-    });
+            if (existing) {
+                await tx
+                    .update(apiCredentials)
+                    .set({
+                        apiKey: sealed,
+                        baseUrl: CHATGPT_BASE_URL,
+                        defaultModel: model,
+                        isDefaultTranscription: false,
+                        updatedAt: new Date(),
+                    })
+                    .where(
+                        and(
+                            eq(apiCredentials.id, existing.id),
+                            eq(apiCredentials.userId, userId),
+                        ),
+                    );
+                return { id: existing.id, defaultModel: model };
+            }
 
+            // First connection: become the enhancement default unless the
+            // user already picked one.
+            const [currentDefault] = await tx
+                .select({ id: apiCredentials.id })
+                .from(apiCredentials)
+                .where(
+                    and(
+                        eq(apiCredentials.userId, userId),
+                        eq(apiCredentials.isDefaultEnhancement, true),
+                    ),
+                )
+                .limit(1);
+
+            const [inserted] = await tx
+                .insert(apiCredentials)
+                .values({
+                    userId,
+                    provider: CHATGPT_PROVIDER_NAME,
+                    apiKey: sealed,
+                    baseUrl: CHATGPT_BASE_URL,
+                    defaultModel: model,
+                    isDefaultTranscription: false,
+                    isDefaultEnhancement: !currentDefault,
+                })
+                .returning({ id: apiCredentials.id });
+            return { id: inserted.id, defaultModel: model };
+        });
+    } catch (error) {
+        await revokeIssued();
+        throw error;
+    }
+    const { id, defaultModel } = saved;
+
+    if (models.length > 0) {
+        modelCache.set(id, { models, fetchedAt: Date.now() });
+    }
     return { id, email: credential.email, defaultModel, models };
 }
 
-/** Revoke the stored refresh token before a ChatGPT row is deleted. */
+/**
+ * Revoke the stored refresh token before a ChatGPT row is deleted.
+ * Returns false when OpenAI didn't confirm, so the caller can warn the
+ * user to revoke Riffado in ChatGPT's settings.
+ */
 export async function revokeChatGptCredential(
     encrypted: string,
-): Promise<void> {
+): Promise<boolean> {
     const credential = tryParse(encrypted);
-    if (!credential?.refreshToken) return;
-    await revokeRefreshToken({
+    if (!credential?.refreshToken) return true;
+    return revokeRefreshToken({
         clientId: credential.clientId,
         refreshToken: credential.refreshToken,
     });
@@ -316,13 +385,68 @@ export function chatGptAccountEmail(encrypted: string): string | null {
     return tryParse(encrypted)?.email ?? null;
 }
 
+/**
+ * Plan model lists change rarely; cache per credential so every summary
+ * can validate its model without an extra round trip.
+ */
+const MODEL_CACHE_TTL_MS = 10 * 60 * 1000;
+const modelCache = new Map<
+    string,
+    { models: ChatGptModel[]; fetchedAt: number }
+>();
+
+/** Test hook. */
+export function resetChatGptModelCache(): void {
+    modelCache.clear();
+}
+
+async function getPlanModels(
+    credentialId: string,
+    accessToken: string,
+): Promise<ChatGptModel[]> {
+    const cached = modelCache.get(credentialId);
+    if (cached && Date.now() - cached.fetchedAt < MODEL_CACHE_TTL_MS) {
+        return cached.models;
+    }
+    const models = await listChatGptModels(accessToken);
+    modelCache.set(credentialId, { models, fetchedAt: Date.now() });
+    return models;
+}
+
 export async function listModelsForCredential(row: {
     id: string;
     userId: string;
     apiKey: string;
 }): Promise<ChatGptModel[]> {
     const accessToken = await getChatGptAccessToken(row);
-    return listChatGptModels(accessToken);
+    const models = await listChatGptModels(accessToken);
+    modelCache.set(row.id, { models, fetchedAt: Date.now() });
+    return models;
+}
+
+/**
+ * Pick the model to run: the requested/default slug if the plan still
+ * offers it, otherwise the plan's first model. A stale saved slug (the
+ * plan changed, or OpenAI retired a model) shouldn't break every
+ * summary. If the model list can't be loaded, fall back to the saved
+ * slug rather than failing before the real request.
+ */
+export async function resolveChatGptModel(
+    credentialId: string,
+    accessToken: string,
+    preferred: string | null,
+): Promise<string | null> {
+    let models: ChatGptModel[];
+    try {
+        models = await getPlanModels(credentialId, accessToken);
+    } catch (error) {
+        if (preferred) return preferred;
+        throw error;
+    }
+    if (preferred && models.some((m) => m.slug === preferred)) {
+        return preferred;
+    }
+    return models[0]?.slug ?? preferred;
 }
 
 /**
@@ -339,11 +463,11 @@ export async function runChatGptCompletion(
     args: { model?: string | null; instructions: string; input: string },
 ): Promise<{ text: string; model: string }> {
     const accessToken = await getChatGptAccessToken(row);
-    let model = args.model || row.defaultModel;
-    if (!model) {
-        const models = await listChatGptModels(accessToken);
-        model = models[0]?.slug ?? null;
-    }
+    const model = await resolveChatGptModel(
+        row.id,
+        accessToken,
+        args.model || row.defaultModel || null,
+    );
     if (!model) {
         throw new AppError(
             ErrorCode.AI_PROVIDER_NOT_CONFIGURED,

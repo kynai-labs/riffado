@@ -4,9 +4,9 @@
  */
 
 import { AppError, ErrorCode } from "@/lib/errors";
+import { CHATGPT_PROVIDER_NAME } from "./constants";
 
-export const CHATGPT_PROVIDER_NAME = "ChatGPT";
-export const CHATGPT_BASE_URL = "https://api.openai.com/v1";
+export { CHATGPT_BASE_URL, CHATGPT_PROVIDER_NAME } from "./constants";
 
 export function isChatGptProvider(provider: string): boolean {
     return provider === CHATGPT_PROVIDER_NAME;

@@ -75,7 +75,9 @@ Riffado keeps the tokens encrypted like any other provider key and
 refreshes them automatically. Pick the model under **Edit provider**; the
 list comes from your plan. Requests count toward your ChatGPT plan's
 usage, and you can cap or revoke Riffado's access in ChatGPT's settings.
-Deleting the provider in Riffado also revokes its access at OpenAI.
+Deleting the provider in Riffado also asks OpenAI to revoke its access.
+That's best effort: if it fails (for example, the server is offline), revoke
+Riffado in ChatGPT's settings.
 
 This option isn't available on the hosted app: OpenAI only allows plan
 usage in open-source, locally hosted apps without a separate approval.

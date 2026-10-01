@@ -108,6 +108,53 @@ export function mapChatGptHttpError(
     );
 }
 
+/**
+ * HTTP status OpenAI documents for each plan-usage error code. Used to
+ * map errors that arrive inside the stream (`response.failed` / `error`
+ * events), where there's no HTTP status, through the same table.
+ */
+const PLAN_ERROR_STATUS: Record<string, number> = {
+    subscription_sharing_usage_limit_exceeded: 429,
+    subscription_sharing_invalid_user: 401,
+    subscription_sharing_user_not_eligible: 403,
+    subscription_sharing_unsupported_capability: 400,
+    subscription_sharing_route_not_supported: 403,
+    subscription_sharing_usage_unavailable: 503,
+    subscription_sharing_user_unavailable: 503,
+    chatpass_v2_scope_not_authorized: 403,
+};
+
+/**
+ * Map a network failure or timeout talking to OpenAI to a typed
+ * provider error instead of letting it surface as an INTERNAL_ERROR 500.
+ */
+export function mapChatGptTransportError(error: unknown): AppError {
+    if (error instanceof AppError) return error;
+    const name = error instanceof Error ? error.name : "";
+    if (name === "TimeoutError" || name === "AbortError") {
+        return new AppError(
+            ErrorCode.SERVICE_UNAVAILABLE,
+            "ChatGPT took too long to respond. Try again in a moment.",
+            503,
+            { provider: CHATGPT_PROVIDER_NAME },
+        );
+    }
+    return new AppError(
+        ErrorCode.AI_PROVIDER_API_ERROR,
+        "Couldn't reach ChatGPT. Check the server's internet connection and try again.",
+        502,
+        { provider: CHATGPT_PROVIDER_NAME },
+    );
+}
+
+async function fetchChatGpt(url: string, init: RequestInit): Promise<Response> {
+    try {
+        return await fetch(url, init);
+    } catch (error) {
+        throw mapChatGptTransportError(error);
+    }
+}
+
 async function readErrorBody(
     response: Response,
 ): Promise<OpenAiErrorBody | null> {
@@ -117,7 +164,7 @@ async function readErrorBody(
 export async function listChatGptModels(
     accessToken: string,
 ): Promise<ChatGptModel[]> {
-    const response = await fetch(MODELS_URL, {
+    const response = await fetchChatGpt(MODELS_URL, {
         headers: { Authorization: `Bearer ${accessToken}` },
         signal: AbortSignal.timeout(MODELS_TIMEOUT_MS),
     });
@@ -193,26 +240,33 @@ export async function* readSseEvents(
         return null;
     };
 
-    while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        let newline = buffer.indexOf("\n");
-        while (newline !== -1) {
-            const line = buffer.slice(0, newline).replace(/\r$/, "");
-            buffer = buffer.slice(newline + 1);
-            const evt = processLine(line);
-            if (evt) yield evt;
-            newline = buffer.indexOf("\n");
+    // Release the upstream connection however the consumer stops: early
+    // `break` on response.completed, a thrown stream error, or EOF.
+    try {
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            let newline = buffer.indexOf("\n");
+            while (newline !== -1) {
+                const line = buffer.slice(0, newline).replace(/\r$/, "");
+                buffer = buffer.slice(newline + 1);
+                const evt = processLine(line);
+                if (evt) yield evt;
+                newline = buffer.indexOf("\n");
+            }
         }
+        buffer += decoder.decode();
+        if (buffer) {
+            const evt = processLine(buffer.replace(/\r$/, ""));
+            if (evt) yield evt;
+        }
+        const last = flush();
+        if (last) yield last;
+    } finally {
+        reader.cancel().catch(() => {});
+        reader.releaseLock();
     }
-    buffer += decoder.decode();
-    if (buffer) {
-        const evt = processLine(buffer.replace(/\r$/, ""));
-        if (evt) yield evt;
-    }
-    const last = flush();
-    if (last) yield last;
 }
 
 /** Pull output text out of a completed response object (fallback path). */
@@ -249,7 +303,7 @@ export async function createChatGptResponse(args: {
     instructions: string;
     input: string;
 }): Promise<string> {
-    const response = await fetch(RESPONSES_URL, {
+    const response = await fetchChatGpt(RESPONSES_URL, {
         method: "POST",
         headers: {
             Authorization: `Bearer ${args.accessToken}`,
@@ -276,50 +330,57 @@ export async function createChatGptResponse(args: {
     let text = "";
     let completed = false;
 
-    for await (const evt of readSseEvents(response.body)) {
-        if (evt.data === "[DONE]") break;
-        let payload: Record<string, unknown>;
-        try {
-            payload = JSON.parse(evt.data);
-        } catch {
-            continue;
-        }
-        const type =
-            typeof payload.type === "string" ? payload.type : evt.event;
-
-        if (type === "response.output_text.delta") {
-            if (typeof payload.delta === "string") text += payload.delta;
-        } else if (type === "response.completed") {
-            completed = true;
-            if (!text) text = outputTextFromResponse(payload.response);
-            break;
-        } else if (type === "response.failed" || type === "error") {
-            const err =
-                (
-                    payload.response as
-                        | { error?: { code?: unknown; message?: unknown } }
-                        | undefined
-                )?.error ??
-                (payload.error as
-                    | { code?: unknown; message?: unknown }
-                    | undefined) ??
-                payload;
-            const code = typeof err?.code === "string" ? err.code : null;
-            if (code === "subscription_sharing_usage_limit_exceeded") {
-                throw mapChatGptHttpError(429, { error: { code } });
+    try {
+        for await (const evt of readSseEvents(response.body)) {
+            if (evt.data === "[DONE]") break;
+            let payload: Record<string, unknown>;
+            try {
+                payload = JSON.parse(evt.data);
+            } catch {
+                continue;
             }
-            const message =
-                typeof err?.message === "string" ? err.message : null;
-            throw streamFailure(
-                message
-                    ? `ChatGPT request failed: ${message}`
-                    : "ChatGPT request failed.",
-            );
-        } else if (type === "response.incomplete") {
-            throw streamFailure(
-                "ChatGPT stopped before finishing the response. Try again, or use a shorter recording.",
-            );
+            const type =
+                typeof payload.type === "string" ? payload.type : evt.event;
+
+            if (type === "response.output_text.delta") {
+                if (typeof payload.delta === "string") text += payload.delta;
+            } else if (type === "response.completed") {
+                completed = true;
+                if (!text) text = outputTextFromResponse(payload.response);
+                break;
+            } else if (type === "response.failed" || type === "error") {
+                const err =
+                    (
+                        payload.response as
+                            | { error?: { code?: unknown; message?: unknown } }
+                            | undefined
+                    )?.error ??
+                    (payload.error as
+                        | { code?: unknown; message?: unknown }
+                        | undefined) ??
+                    payload;
+                const code = typeof err?.code === "string" ? err.code : null;
+                if (code && PLAN_ERROR_STATUS[code]) {
+                    throw mapChatGptHttpError(PLAN_ERROR_STATUS[code], {
+                        error: { code },
+                    });
+                }
+                const message =
+                    typeof err?.message === "string" ? err.message : null;
+                throw streamFailure(
+                    message
+                        ? `ChatGPT request failed: ${message}`
+                        : "ChatGPT request failed.",
+                );
+            } else if (type === "response.incomplete") {
+                throw streamFailure(
+                    "ChatGPT stopped before finishing the response. Try again, or use a shorter recording.",
+                );
+            }
         }
+    } catch (error) {
+        // Timeouts or dropped connections mid-stream.
+        throw mapChatGptTransportError(error);
     }
 
     if (!completed) {

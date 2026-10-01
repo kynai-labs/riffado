@@ -300,13 +300,17 @@ export function refreshAccessToken(args: {
     });
 }
 
-/** Best-effort revocation on disconnect. Never throws. */
+/**
+ * Revoke a refresh token at OpenAI. Never throws; returns whether OpenAI
+ * confirmed the revocation (2xx) so callers can tell the user when it
+ * didn't. Logs only the status, never the token.
+ */
 export async function revokeRefreshToken(args: {
     clientId: string;
     refreshToken: string;
-}): Promise<void> {
+}): Promise<boolean> {
     try {
-        await fetch(CHATGPT_REVOKE_URL, {
+        const response = await fetch(CHATGPT_REVOKE_URL, {
             method: "POST",
             headers: { "Content-Type": "application/x-www-form-urlencoded" },
             body: new URLSearchParams({
@@ -316,8 +320,19 @@ export async function revokeRefreshToken(args: {
             }).toString(),
             signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
         });
+        if (!response.ok) {
+            console.warn(
+                `[chatgpt] token revocation rejected (${response.status})`,
+            );
+            return false;
+        }
+        return true;
     } catch (error) {
-        console.warn("[chatgpt] token revocation failed", error);
+        console.warn(
+            "[chatgpt] token revocation failed",
+            error instanceof Error ? error.name : "unknown error",
+        );
+        return false;
     }
 }
 

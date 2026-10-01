@@ -1,3 +1,5 @@
+import { CHATGPT_BASE_URL, CHATGPT_PROVIDER_NAME } from "./chatgpt/constants";
+
 export type TranscriptionStyle = "whisper" | "chat" | "gemini" | "elevenlabs";
 
 export interface ProviderPreset {
@@ -116,8 +118,8 @@ export const PROVIDER_PRESETS: readonly ProviderPreset[] = [
         // for open-source, locally hosted apps; remotely hosted apps need
         // OpenAI's approval, so it's self-host only. Text-only: summaries
         // and titles, never transcription.
-        name: "ChatGPT",
-        baseUrl: "https://api.openai.com/v1",
+        name: CHATGPT_PROVIDER_NAME,
+        baseUrl: CHATGPT_BASE_URL,
         placeholder: "",
         defaultModel: "",
         transcriptionStyle: "whisper",

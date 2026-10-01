@@ -206,9 +206,9 @@ export const DELETE = apiHandler<IdContext>(async (request, context) => {
             ),
         )
         .limit(1);
-    if (chatGptRow) {
-        await revokeChatGptCredential(chatGptRow.apiKey);
-    }
+    const revoked = chatGptRow
+        ? await revokeChatGptCredential(chatGptRow.apiKey)
+        : true;
 
     // Verify ownership and delete
     await db
@@ -222,6 +222,16 @@ export const DELETE = apiHandler<IdContext>(async (request, context) => {
 
     if (settings?.pointer === id) {
         await setDefaultTranscriptionProvider(session.user.id, null);
+    }
+
+    if (!revoked) {
+        // The row is gone either way (the user asked to disconnect), but
+        // tell them OpenAI didn't confirm so they can revoke it there.
+        return NextResponse.json({
+            success: true,
+            warning:
+                "Removed from Riffado, but OpenAI didn't confirm revoking access. Revoke Riffado in ChatGPT's settings to be sure.",
+        });
     }
 
     return NextResponse.json({ success: true });

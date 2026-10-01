@@ -149,6 +149,24 @@ describe("createChatGptResponse", () => {
         await expect(createChatGptResponse(args)).resolves.toBe("Title");
     });
 
+    it("cancels the upstream stream once the response completes", async () => {
+        const cancel = vi.fn();
+        const body = new ReadableStream<Uint8Array>({
+            start(controller) {
+                controller.enqueue(
+                    new TextEncoder().encode(
+                        sse([{ type: "response.completed", response: {} }]),
+                    ),
+                );
+                // Never closes: the server would keep the connection open.
+            },
+            cancel,
+        });
+        fetchMock.mockResolvedValueOnce(new Response(body, { status: 200 }));
+        await createChatGptResponse(args);
+        expect(cancel).toHaveBeenCalled();
+    });
+
     it("fails if the stream ends without response.completed", async () => {
         fetchMock.mockResolvedValueOnce(
             streamResponse(
@@ -226,6 +244,87 @@ describe("createChatGptResponse", () => {
         );
         await expect(createChatGptResponse(args)).rejects.toMatchObject({
             code: expected,
+        });
+    });
+});
+
+describe("createChatGptResponse error mapping", () => {
+    const args = {
+        accessToken: "at",
+        model: "m",
+        instructions: "i",
+        input: "x",
+    };
+
+    it.each([
+        [
+            "subscription_sharing_invalid_user",
+            ErrorCode.AI_PROVIDER_NOT_CONFIGURED,
+        ],
+        [
+            "subscription_sharing_user_unavailable",
+            ErrorCode.SERVICE_UNAVAILABLE,
+        ],
+        [
+            "subscription_sharing_unsupported_capability",
+            ErrorCode.AI_PROVIDER_API_ERROR,
+        ],
+    ])("maps an in-stream %s like its HTTP equivalent", async (code, expected) => {
+        fetchMock.mockResolvedValueOnce(
+            streamResponse(
+                sse([
+                    {
+                        type: "response.failed",
+                        response: { error: { code, message: "x" } },
+                    },
+                ]),
+            ),
+        );
+        await expect(createChatGptResponse(args)).rejects.toMatchObject({
+            code: expected,
+        });
+    });
+
+    it("maps a timeout to SERVICE_UNAVAILABLE", async () => {
+        fetchMock.mockRejectedValueOnce(
+            new DOMException("The operation timed out.", "TimeoutError"),
+        );
+        await expect(createChatGptResponse(args)).rejects.toMatchObject({
+            code: ErrorCode.SERVICE_UNAVAILABLE,
+        });
+    });
+
+    it("maps a network failure to AI_PROVIDER_API_ERROR", async () => {
+        fetchMock.mockRejectedValueOnce(new TypeError("fetch failed"));
+        await expect(createChatGptResponse(args)).rejects.toMatchObject({
+            code: ErrorCode.AI_PROVIDER_API_ERROR,
+            statusCode: 502,
+        });
+    });
+
+    it("maps a connection dropped mid-stream to a typed error", async () => {
+        const body = new ReadableStream<Uint8Array>({
+            start(controller) {
+                controller.enqueue(
+                    new TextEncoder().encode(
+                        sse([
+                            { type: "response.output_text.delta", delta: "a" },
+                        ]),
+                    ),
+                );
+                controller.error(new TypeError("terminated"));
+            },
+        });
+        fetchMock.mockResolvedValueOnce(new Response(body, { status: 200 }));
+        await expect(createChatGptResponse(args)).rejects.toBeInstanceOf(
+            AppError,
+        );
+    });
+
+    it("maps a models-list network failure to a typed error", async () => {
+        fetchMock.mockRejectedValueOnce(new TypeError("fetch failed"));
+        await expect(listChatGptModels("at")).rejects.toMatchObject({
+            code: ErrorCode.AI_PROVIDER_API_ERROR,
         });
     });
 });

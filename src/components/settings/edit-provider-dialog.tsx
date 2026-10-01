@@ -106,7 +106,18 @@ export function EditProviderDialog({
                 if (!res.ok) {
                     throw new Error(data?.error || "Couldn't load models");
                 }
-                if (!cancelled) setChatGptModels(data?.models ?? []);
+                const models = (data?.models ?? []) as ChatGptModelOption[];
+                if (!cancelled) {
+                    setChatGptModels(models);
+                    // A saved slug the plan no longer offers would leave
+                    // the select blank while still being submitted; snap
+                    // to the first available model instead.
+                    setDefaultModel((current) =>
+                        current && models.some((m) => m.slug === current)
+                            ? current
+                            : (models[0]?.slug ?? ""),
+                    );
+                }
             })
             .catch((error: unknown) => {
                 if (!cancelled) {
