@@ -14,7 +14,7 @@ import { AppError, ErrorCode } from "@/lib/errors";
 import { CHATGPT_PROVIDER_NAME } from "./constants";
 
 export function isChatGptPlanUsageEnabled(): boolean {
-    return !env.IS_HOSTED && env.ENABLE_CHATGPT_PLAN_USAGE;
+    return !env.IS_HOSTED && env.ENABLE_CHATGPT_PLAN_USAGE === true;
 }
 
 export const CHATGPT_DISABLED_MESSAGE =
@@ -29,7 +29,7 @@ export function assertChatGptPlanUsageEnabled(): void {
     if (env.IS_HOSTED) {
         throw new AppError(ErrorCode.NOT_FOUND, "Not found", 404);
     }
-    if (!env.ENABLE_CHATGPT_PLAN_USAGE) {
+    if (env.ENABLE_CHATGPT_PLAN_USAGE !== true) {
         throw new AppError(
             ErrorCode.AI_PROVIDER_NOT_CONFIGURED,
             CHATGPT_DISABLED_MESSAGE,

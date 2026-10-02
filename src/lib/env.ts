@@ -33,11 +33,10 @@ const baseEnvSchema = z.object({
      * Opt in to "Sign in with ChatGPT" plan usage for summaries and titles
      * (self-host only). Off by default: when on, transcript text for
      * summaries/titles goes to OpenAI for users who connect ChatGPT.
+     * Strict: anything but "true"/"false"/unset fails startup, so a typo
+     * like "TRUE" or "1" can't silently leave it off.
      */
-    ENABLE_CHATGPT_PLAN_USAGE: z
-        .string()
-        .optional()
-        .transform((val) => val === "true"),
+    ENABLE_CHATGPT_PLAN_USAGE: optionalStrictBoolean,
 
     /** Disable the self-host update-available check. */
     DISABLE_UPDATE_CHECK: z
