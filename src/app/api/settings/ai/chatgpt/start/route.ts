@@ -3,10 +3,8 @@ import {
     sealPendingSignIn,
     startChatGptSignIn,
 } from "@/lib/ai/chatgpt/connect";
-import {
-    assertSelfHosted,
-    signInCookieOptions,
-} from "@/lib/ai/chatgpt/route-helpers";
+import { assertChatGptPlanUsageEnabled } from "@/lib/ai/chatgpt/feature";
+import { signInCookieOptions } from "@/lib/ai/chatgpt/route-helpers";
 import { requireApiSession } from "@/lib/auth-server";
 import { apiHandler } from "@/lib/errors";
 
@@ -14,7 +12,7 @@ import { apiHandler } from "@/lib/errors";
 // and keeps the PKCE verifier/state sealed in an HttpOnly cookie until
 // the user pastes the loopback URL back into /complete.
 export const POST = apiHandler(async (request: Request) => {
-    assertSelfHosted();
+    assertChatGptPlanUsageEnabled();
     const session = await requireApiSession(request);
 
     const { authorizeUrl, pending } = await startChatGptSignIn(session.user.id);

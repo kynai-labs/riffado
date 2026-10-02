@@ -62,6 +62,13 @@ titles** on your ChatGPT plan instead of an API key, using OpenAI's
 "Sign in with ChatGPT". Transcription still needs another provider
 (plan usage covers text requests only, not audio).
 
+It's **off by default**. Connecting it means transcript text for
+summaries and titles goes to OpenAI, so the server operator has to opt
+in first: set `ENABLE_CHATGPT_PLAN_USAGE=true` in `.env` and recreate the
+app container (`docker compose up -d`). Until then the ChatGPT option
+doesn't appear, and turning the flag back off stops any existing
+ChatGPT connection from being used.
+
 1. **Settings → AI providers → Add provider → ChatGPT**.
 2. Click **Sign in with ChatGPT**. A new tab opens on OpenAI; sign in and
    allow Riffado to use your plan.

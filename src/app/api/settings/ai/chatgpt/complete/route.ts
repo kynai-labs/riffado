@@ -4,8 +4,8 @@ import {
     completeChatGptSignIn,
     unsealPendingSignIn,
 } from "@/lib/ai/chatgpt/connect";
+import { assertChatGptPlanUsageEnabled } from "@/lib/ai/chatgpt/feature";
 import {
-    assertSelfHosted,
     CHATGPT_SIGN_IN_COOKIE,
     readCookie,
     signInCookieOptions,
@@ -20,7 +20,7 @@ const bodySchema = z.object({
 
 // POST - Finish "Sign in with ChatGPT" from the pasted loopback URL.
 export const POST = apiHandler(async (request: Request) => {
-    assertSelfHosted();
+    assertChatGptPlanUsageEnabled();
     const session = await requireApiSession(request);
 
     const parsed = bodySchema.safeParse(await request.json().catch(() => null));

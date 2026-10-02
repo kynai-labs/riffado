@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { MetalButton } from "@/components/metal-button";
 import { Panel } from "@/components/panel";
@@ -46,7 +46,27 @@ export function AddProviderDialog({
     onSuccess,
     isHosted = false,
 }: AddProviderDialogProps) {
-    const visiblePresets = getVisiblePresets({ isHosted });
+    // The ChatGPT preset only appears when the operator opted in with
+    // ENABLE_CHATGPT_PLAN_USAGE; the server is the source of truth.
+    const [chatGptEnabled, setChatGptEnabled] = useState(false);
+    useEffect(() => {
+        if (!open || isHosted) return;
+        let cancelled = false;
+        fetch("/api/settings/ai/chatgpt/status")
+            .then((res) => (res.ok ? res.json() : null))
+            .then((data) => {
+                if (!cancelled) setChatGptEnabled(data?.enabled === true);
+            })
+            .catch(() => {
+                if (!cancelled) setChatGptEnabled(false);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [open, isHosted]);
+    const visiblePresets = getVisiblePresets({ isHosted }).filter(
+        (preset) => chatGptEnabled || !preset.usesChatGptSignIn,
+    );
     const [provider, setProvider] = useState("");
     const [apiKey, setApiKey] = useState("");
     const [baseUrl, setBaseUrl] = useState("");

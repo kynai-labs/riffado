@@ -1,21 +1,9 @@
 import { env } from "@/lib/env";
-import { AppError, ErrorCode } from "@/lib/errors";
 import { PENDING_SIGN_IN_TTL_MS } from "./connect";
 
 /** Holds the sealed PKCE/state between "start" and "complete". */
 export const CHATGPT_SIGN_IN_COOKIE = "riffado_chatgpt_signin";
 export const CHATGPT_SIGN_IN_COOKIE_PATH = "/api/settings/ai/chatgpt";
-
-/**
- * ChatGPT plan usage is only offered on self-hosted instances: OpenAI
- * requires approval for remotely hosted apps. Hide the routes entirely
- * on hosted.
- */
-export function assertSelfHosted(): void {
-    if (env.IS_HOSTED) {
-        throw new AppError(ErrorCode.NOT_FOUND, "Not found", 404);
-    }
-}
 
 /**
  * Self-hosted instances often run over plain HTTP on a LAN

@@ -15,6 +15,7 @@ import {
     parseCredential,
     serializeCredential,
 } from "./credentials";
+import { assertChatGptPlanUsageEnabled } from "./feature";
 import {
     type ChatGptModel,
     createChatGptResponse,
@@ -480,6 +481,9 @@ export async function runChatGptCompletion(
     },
     args: { model?: string | null; instructions: string; input: string },
 ): Promise<{ text: string; model: string }> {
+    // A connection made while the flag was on stops being used the moment
+    // an operator turns it off.
+    assertChatGptPlanUsageEnabled();
     const accessToken = await getChatGptAccessToken(row);
     const model = await resolveChatGptModel(
         row.id,

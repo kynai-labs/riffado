@@ -3,14 +3,14 @@ import { NextResponse } from "next/server";
 import { db } from "@/db";
 import { apiCredentials } from "@/db/schema";
 import { listModelsForCredential } from "@/lib/ai/chatgpt/connect";
-import { assertSelfHosted } from "@/lib/ai/chatgpt/route-helpers";
+import { assertChatGptPlanUsageEnabled } from "@/lib/ai/chatgpt/feature";
 import { CHATGPT_PROVIDER_NAME } from "@/lib/ai/chatgpt/shared";
 import { requireApiSession } from "@/lib/auth-server";
 import { AppError, apiHandler, ErrorCode } from "@/lib/errors";
 
 // GET - Models available on the user's connected ChatGPT plan.
 export const GET = apiHandler(async (request: Request) => {
-    assertSelfHosted();
+    assertChatGptPlanUsageEnabled();
     const session = await requireApiSession(request);
 
     const [row] = await db
