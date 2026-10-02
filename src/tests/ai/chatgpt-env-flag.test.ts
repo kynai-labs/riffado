@@ -28,12 +28,12 @@ afterAll(() => {
 });
 
 describe("ENABLE_CHATGPT_PLAN_USAGE env contract", () => {
-    it("is off when unset or empty", () => {
-        expect(envSchema.parse({}).ENABLE_CHATGPT_PLAN_USAGE).not.toBe(true);
+    it("is unset (off) when missing or empty", () => {
+        expect(envSchema.parse({}).ENABLE_CHATGPT_PLAN_USAGE).toBeUndefined();
         expect(
             envSchema.parse({ ENABLE_CHATGPT_PLAN_USAGE: "" })
                 .ENABLE_CHATGPT_PLAN_USAGE,
-        ).not.toBe(true);
+        ).toBeUndefined();
     });
 
     it('accepts "true" and "false"', () => {
